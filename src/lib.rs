@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! See [`Dcf`]
-
+#![feature(trivial_bounds)]
 #[cfg(feature = "prg")]
 pub mod prg;
 
@@ -13,6 +13,10 @@ use bitvec::prelude::*;
 use rayon::prelude::*;
 
 use crate::utils::{xor, xor_inplace};
+use serde_with::serde_as;
+use serde::ser::{Serialize, Serializer, SerializeStruct};
+use serde::de::{self, Deserialize, Deserializer, SeqAccess, Visitor};
+use std::fmt;
 
 /// API of Distributed comparison function.
 ///
@@ -209,10 +213,64 @@ pub struct Cw<const LAMBDA: usize> {
     pub tr: bool,
 }
 
+
+impl<const LAMBDA: usize> Serialize for Cw<LAMBDA> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+    {
+        let mut s = serializer.serialize_struct("Cw", 4)?;
+        s.serialize_field("s", &self.s.to_vec())?;
+        s.serialize_field("v", &self.v.to_vec())?;
+        s.serialize_field("tl", &self.tl)?;
+        s.serialize_field("tr", &self.tr)?;
+        s.end()
+    }
+}
+
+impl<const LAMBDA: usize> Deserialize<'static> for Cw<LAMBDA> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: Deserializer<'static>,
+    {
+        struct CwVisitor<const LAMBDA: usize>;
+
+        impl<const LAMBDA: usize> Visitor<'static> for CwVisitor<LAMBDA> {
+            type Value = Cw<LAMBDA>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("struct Cw")
+            }
+
+            fn visit_seq<V>(self, mut seq: V) -> Result<Cw<LAMBDA>, V::Error>
+                where
+                    V: SeqAccess<'static>,
+            {
+                let s_vec: Vec<u8> = seq.next_element()?.ok_or_else(|| de::Error::invalid_length(0, &self))?;
+                let mut s = [0u8; LAMBDA];
+                s.copy_from_slice(&s_vec);
+
+                let v_vec: Vec<u8> = seq.next_element()?.ok_or_else(|| de::Error::invalid_length(1, &self))?;
+                let mut v = [0u8; LAMBDA];
+                v.copy_from_slice(&v_vec);
+
+                let tl: bool = seq.next_element()?.ok_or_else(|| de::Error::invalid_length(2, &self))?;
+                let tr: bool = seq.next_element()?.ok_or_else(|| de::Error::invalid_length(3, &self))?;
+
+                Ok(Cw { s, v, tl, tr })
+            }
+        }
+
+        const FIELDS: &'static [&'static str] = &["s", "v", "tl", "tr"];
+        deserializer.deserialize_struct("Cw", FIELDS, CwVisitor)
+    }
+}
+
 /// `k`.
 ///
 /// `cws` and `cw_np1` is shared by the 2 parties.
 /// Only `s0s[0]` is different.
+#[serde_as]
 #[derive(Clone)]
 pub struct Share<const LAMBDA: usize> {
     /// For the output of `gen`, its length is 2.
@@ -222,6 +280,63 @@ pub struct Share<const LAMBDA: usize> {
     pub cws: Vec<Cw<LAMBDA>>,
     /// `$CW^{(n + 1)}$`
     pub cw_np1: [u8; LAMBDA],
+}
+
+impl<const LAMBDA: usize> Serialize for Share<LAMBDA> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+    {
+        let mut s = serializer.serialize_struct("Share", 3)?;
+        let s0s_as_vecs: Vec<Vec<u8>> = self.s0s.iter().map(|arr| arr.to_vec()).collect();
+        s.serialize_field("s0s", &s0s_as_vecs)?;
+        s.serialize_field("cws", &self.cws)?;
+        s.serialize_field("cw_np1", &self.cw_np1.to_vec())?;
+        s.end()
+    }
+}
+
+impl<const LAMBDA: usize> Deserialize<'static> for Share<LAMBDA> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: Deserializer<'static>,
+    {
+        struct ShareVisitor<const LAMBDA: usize>;
+
+        impl<const LAMBDA: usize> Visitor<'static> for ShareVisitor<LAMBDA> {
+            type Value = Share<LAMBDA>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("struct Share")
+            }
+
+            fn visit_seq<V>(self, mut seq: V) -> Result<Share<LAMBDA>, V::Error>
+                where
+                    V: SeqAccess<'static>,
+            {
+                let s0s_as_vecs: Vec<Vec<u8>> = seq.next_element()?.ok_or_else(|| de::Error::invalid_length(0, &self))?;
+                let s0s: Vec<[u8; LAMBDA]> = s0s_as_vecs.into_iter().map(|v| {
+                    let mut arr = [0u8; LAMBDA];
+                    arr.copy_from_slice(&v);
+                    arr
+                }).collect();
+
+                let cws: Vec<Cw<LAMBDA>> = seq.next_element()?.ok_or_else(|| de::Error::invalid_length(1, &self))?;
+                let cw_np1_vec: Vec<u8> = seq.next_element()?.ok_or_else(|| de::Error::invalid_length(2, &self))?;
+                let mut cw_np1 = [0u8; LAMBDA];
+                cw_np1.copy_from_slice(&cw_np1_vec);
+
+                Ok(Share {
+                    s0s,
+                    cws,
+                    cw_np1,
+                })
+            }
+        }
+
+        const FIELDS: &'static [&'static str] = &["s0s", "cws", "cw_np1"];
+        deserializer.deserialize_struct("Share", FIELDS, ShareVisitor)
+    }
 }
 
 pub enum BoundState {
